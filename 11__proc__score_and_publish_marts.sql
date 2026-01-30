@@ -213,8 +213,132 @@ begin
     from DB_BI_P_SANDBOX.SANDBOX.FORECAST_MODEL_RUNS
   ),
   
-  -- For now, use simple forecast logic based on model family
-  -- In production, you'd load actual model artifacts and score
+  -- Pre-compute lag-12 actuals for baseline fallback
+  lag12_actuals as (
+    select
+      roll_up_shop,
+      reason_group,
+      month_seq,
+      total_revenue
+    from DB_BI_P_SANDBOX.SANDBOX.FORECAST_ACTUALS_PC_REASON_MTH
+  ),
+  
+  -- Get anchor actuals (latest closed month) for scaling
+  anchor_actuals as (
+    select
+      roll_up_shop,
+      reason_group,
+      total_revenue as anchor_revenue
+    from DB_BI_P_SANDBOX.SANDBOX.FORECAST_ACTUALS_PC_REASON_MTH
+    where month_seq = :V_ANCHOR_SEQ
+  ),
+  
+  -- Pre-compute backtest predictions aggregated by series and horizon
+  -- Recent backtests (last 6 anchors)
+  backtest_recent as (
+    select
+      model_run_id,
+      roll_up_shop,
+      reason_group,
+      horizon,
+      avg(y_pred) as avg_pred_recent,
+      avg(y_true) as avg_true_recent
+    from DB_BI_P_SANDBOX.SANDBOX.FORECAST_MODEL_BACKTEST_PREDICTIONS
+    where anchor_month_seq >= (:V_ANCHOR_SEQ - 6)
+    group by 1, 2, 3, 4
+  ),
+  
+  -- All backtests (fallback)
+  backtest_all as (
+    select
+      model_run_id,
+      roll_up_shop,
+      reason_group,
+      horizon,
+      avg(y_pred) as avg_pred_all
+    from DB_BI_P_SANDBOX.SANDBOX.FORECAST_MODEL_BACKTEST_PREDICTIONS
+    group by 1, 2, 3, 4
+  ),
+  
+  -- Generate predictions using backtest patterns
+  model_predictions as (
+    select
+      sg.roll_up_shop,
+      sg.reason_group,
+      sg.target_fiscal_yyyymm,
+      sg.target_month_seq,
+      sg.horizon,
+      sg.model_run_id,
+      m.model_family,
+      
+      case 
+        when m.model_family = 'baseline' then
+          -- Seasonal naive: use lag-12
+          coalesce(lag12.total_revenue, 0)
+        
+        when m.model_family in ('ridge', 'gbr') then
+          -- Use backtest prediction pattern with growth ratio
+          coalesce(
+            -- Try recent backtests with anchor scaling
+            (br.avg_pred_recent * aa.anchor_revenue / nullif(br.avg_true_recent, 0)),
+            -- Fallback: all backtests average
+            ba.avg_pred_all,
+            -- Final fallback: lag-12
+            lag12.total_revenue,
+            0
+          )
+        
+        else
+          -- Unknown model family: use lag-12 as safe fallback
+          coalesce(lag12.total_revenue, 0)
+      end as y_pred
+      
+    from score_grid_with_model sg
+    join models m on m.model_run_id = sg.model_run_id
+    left join lag12_actuals lag12
+      on lag12.roll_up_shop = sg.roll_up_shop
+     and lag12.reason_group = sg.reason_group
+     and lag12.month_seq = sg.target_month_seq - 12
+    left join anchor_actuals aa
+      on aa.roll_up_shop = sg.roll_up_shop
+     and aa.reason_group = sg.reason_group
+    left join backtest_recent br
+      on br.model_run_id = sg.model_run_id
+     and br.roll_up_shop = sg.roll_up_shop
+     and br.reason_group = sg.reason_group
+     and br.horizon = sg.horizon
+    left join backtest_all ba
+      on ba.model_run_id = sg.model_run_id
+     and ba.roll_up_shop = sg.roll_up_shop
+     and ba.reason_group = sg.reason_group
+     and ba.horizon = sg.horizon
+  ),
+  
+  -- Calculate confidence intervals from backtest residuals
+  prediction_intervals as (
+    select
+      mp.*,
+      -- Get prediction interval from backtest residuals
+      coalesce(res.error_10pct, abs(mp.y_pred * 0.2)) as prediction_error_10pct,
+      coalesce(res.error_90pct, abs(mp.y_pred * 0.2)) as prediction_error_90pct
+    from model_predictions mp
+    left join (
+      select
+        model_run_id,
+        roll_up_shop,
+        reason_group,
+        horizon,
+        percentile_cont(0.1) within group (order by abs(y_true - y_pred)) as error_10pct,
+        percentile_cont(0.9) within group (order by abs(y_true - y_pred)) as error_90pct
+      from DB_BI_P_SANDBOX.SANDBOX.FORECAST_MODEL_BACKTEST_PREDICTIONS
+      group by 1, 2, 3, 4
+    ) res
+      on res.model_run_id = mp.model_run_id
+     and res.roll_up_shop = mp.roll_up_shop
+     and res.reason_group = mp.reason_group
+     and res.horizon = mp.horizon
+  ),
+  
   forecasts_base as (
     select
       sg.roll_up_shop,
@@ -226,49 +350,41 @@ begin
       sg.target_month_start,
       sg.target_month_end,
       sg.horizon,
-      sg.model_run_id,
+      pi.y_pred as revenue_forecast,
+      greatest(0, pi.y_pred - pi.prediction_error_90pct) as revenue_forecast_lo,
+      pi.y_pred + pi.prediction_error_90pct as revenue_forecast_hi,
+      pi.model_run_id,
       m.model_family,
-      m.model_scope,
+      m.model_scope
       
-      -- Simple scoring logic (replace with actual model scoring in production)
-      -- For baseline: use lag-12 from actuals
-      case 
-        when m.model_family = 'baseline' then
-          coalesce(
-            (select total_revenue 
-             from DB_BI_P_SANDBOX.SANDBOX.FORECAST_ACTUALS_PC_REASON_MTH a
-             where a.roll_up_shop = sg.roll_up_shop
-               and a.reason_group = sg.reason_group
-               and a.month_seq = sg.target_month_seq - 12
-            ), 0
-          )
-        
-        -- For other models: use average of recent actuals as placeholder
-        -- TODO: Replace with actual model predictions
-        else
-          coalesce(
-            (select avg(total_revenue)
-             from DB_BI_P_SANDBOX.SANDBOX.FORECAST_ACTUALS_PC_REASON_MTH a
-             where a.roll_up_shop = sg.roll_up_shop
-               and a.reason_group = sg.reason_group
-               and a.month_seq between (sg.anchor_month_seq - 11) and sg.anchor_month_seq
-            ), 0
-          )
-      end as revenue_forecast,
-      
-      -- Placeholder confidence intervals (±20%)
-      revenue_forecast * 0.8 as revenue_forecast_lo,
-      revenue_forecast * 1.2 as revenue_forecast_hi
-      
-    from score_grid_with_model sg
-    join models m on m.model_run_id = sg.model_run_id
+    from score_grid_with_target sg
+    join prediction_intervals pi
+      on pi.roll_up_shop = sg.roll_up_shop
+     and pi.reason_group = sg.reason_group
+     and pi.target_month_seq = sg.target_month_seq
+     and pi.horizon = sg.horizon
+    join models m on m.model_run_id = pi.model_run_id
   )
   
   select
     :V_FORECAST_RUN_ID as forecast_run_id,
     :V_ASOF_YYYYMM as asof_fiscal_yyyymm,
     current_timestamp() as forecast_created_at,
-    *,
+    roll_up_shop,
+    reason_group,
+    target_fiscal_yyyymm,
+    target_fiscal_year,
+    target_fiscal_month,
+    target_month_seq,
+    target_month_start,
+    target_month_end,
+    horizon,
+    revenue_forecast,
+    revenue_forecast_lo,
+    revenue_forecast_hi,
+    model_run_id,
+    model_family,
+    model_scope,
     current_timestamp() as published_at
   from forecasts_base;
 
