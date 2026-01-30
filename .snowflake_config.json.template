@@ -1,0 +1,9 @@
+{
+  "account": "your_account.region",
+  "user": "your_username",
+  "authenticator": "externalbrowser",
+  "role": "your_role",
+  "warehouse": "your_warehouse",
+  "database": "DB_BI_P_SANDBOX",
+  "schema": "SANDBOX"
+}
