@@ -1,0 +1,11 @@
+roll_up_shop,reason_group,customer_group,total_revenue,wape_pct,recommended_action
+555,Routine,Unknown,50906454.74,48.49468138389556,"MEDIUM: Monitor closely, consider feature engineering"
+715,Routine,Unknown,28336943.56,21.2685582594286,LOW: Continue monitoring champion model
+695,Routine,Unknown,24201940.06,29.437075756479665,LOW: Continue monitoring champion model
+654,Routine,Unknown,22107292.28,10.607288763814179,LOW: Continue monitoring champion model
+699,Routine,Unknown,21741531.94,24.576640665183966,LOW: Continue monitoring champion model
+644,Routine,Unknown,21489149.97,11.545012824907007,LOW: Continue monitoring champion model
+698,Routine,Unknown,20692974.27,22.41955607476817,LOW: Continue monitoring champion model
+556,Routine,Unknown,17358030.54,10.33829019867596,LOW: Continue monitoring champion model
+642,Routine,Unknown,15612473.7,18.550241016578944,LOW: Continue monitoring champion model
+557,Routine,Unknown,15280998.64,18.29413682874328,LOW: Continue monitoring champion model
