@@ -1,0 +1,292 @@
+REPO SCAN RESULTS - Production Alignment Audit
+Date: 2026-01-31
+Current Branch: presentation/current-forecast-20260131-fix-whatif
+
+================================================================================
+1. FORECAST_MODEL_PREDICTIONS (MISSING TABLE)
+================================================================================
+
+NO REFERENCES FOUND IN REPOSITORY
+
+This confirms the table does NOT exist and the repository code does NOT expect it.
+
+================================================================================
+2. FORECAST_MODEL_BACKTEST_PREDICTIONS (CANONICAL TABLE)
+================================================================================
+
+REFERENCES: 30+ files
+
+PRIMARY PRODUCTION FILES:
+  - 10__setup__model_tracking_tables.sql:52
+    CREATE OR REPLACE TABLE FORECAST_MODEL_BACKTEST_PREDICTIONS
+    (Schema definition - 14 columns with anchor+horizon pattern)
+
+  - 10__modeling__backtest_global_plus_overrides.ipynb:404
+    DELETE FROM FORECAST_MODEL_BACKTEST_PREDICTIONS (HIGH RISK - destructive)
+
+  - 10__modeling__backtest_global_plus_overrides.ipynb:540
+    INSERT INTO FORECAST_MODEL_BACKTEST_PREDICTIONS (writes predictions)
+
+  - 11__proc__score_and_publish_marts.sql:246
+    FROM FORECAST_MODEL_BACKTEST_PREDICTIONS (READ for scoring/publishing)
+
+  - 11__proc__score_and_publish_marts.sql:259
+    FROM FORECAST_MODEL_BACKTEST_PREDICTIONS (READ for scoring/publishing)
+
+  - 11__proc__score_and_publish_marts.sql:333
+    FROM FORECAST_MODEL_BACKTEST_PREDICTIONS (READ for scoring/publishing)
+
+ANALYSIS/DIAGNOSTIC FILES (safe):
+  - 15_series_diagnostic.py:87 (read-only)
+  - backtest_performance_analysis.sql:16,34,63,85 (read-only analysis)
+  - check_ridge_predictions.py:26,52 (read-only verification)
+  - investigate_problem_pcs.sql:81 (read-only diagnostics)
+  - run_full_analysis.py:40,100 (read-only)
+
+DOCUMENTATION:
+  - docs/RIDGE_ARCHIVE_AND_REMOVAL.md
+    Documents Ridge model archival using FORECAST_MODEL_BACKTEST_PREDICTIONS_RIDGE_ARCHIVE
+    Contains DELETE statements (executed 2026-01-29)
+
+================================================================================
+3. RNA_RCT_TMT_CCCI_PL_RO_REVENUE_5YEARS (BUDGET VIEW)
+================================================================================
+
+REFERENCES: 11 files (all READ-ONLY - never used as feature)
+
+PRODUCTION STORED PROCEDURES (read budget for comparison):
+  - 03__proc__pc_eligibility.sql:65
+    FROM RNA_RCT_TMT_CCCI_PL_RO_REVENUE_5YEARS (reads budget for PC eligibility)
+
+  - 04__proc__run_orchestrator.sql:133
+    FROM RNA_RCT_TMT_CCCI_PL_RO_REVENUE_5YEARS (reads budget metadata)
+
+  - 06__proc__build_actuals_pc_reason.sql:62,90
+    FROM RNA_RCT_TMT_CCCI_PL_RO_REVENUE_5YEARS (reads actuals, NOT budget column)
+
+  - 07__proc__build_cust_mix_pc_reason.sql:70,126
+    FROM RNA_RCT_TMT_CCCI_PL_RO_REVENUE_5YEARS (reads revenue/mix, NOT budget column)
+
+  - 08__proc__build_budget_pc_reason_mth.sql:62,90
+    FROM RNA_RCT_TMT_CCCI_PL_RO_REVENUE_5YEARS (reads budget for post-hoc comparison)
+
+ANALYSIS FILES (read-only):
+  - investigate_problem_pcs.sql:28,50
+
+SAFETY CHECK: Budget is NEVER used as a model feature (only for comparison/reporting) ✓
+
+================================================================================
+4. FORECAST_MODEL_CHAMPIONS & FORECAST_MODEL_RUNS
+================================================================================
+
+REFERENCES: 50+ files
+
+CHAMPION SELECTION (production):
+  - 10__modeling__backtest_global_plus_overrides.ipynb:1044
+    MERGE INTO FORECAST_MODEL_CHAMPIONS (upserts champion selection)
+
+  - 11__proc__score_and_publish_marts.sql:136
+    FROM FORECAST_MODEL_CHAMPIONS (reads current champion for scoring)
+
+MODEL RUN TRACKING (production):
+  - 10__modeling__backtest_global_plus_overrides.ipynb:193
+    INSERT INTO FORECAST_MODEL_RUNS (registers new model runs)
+
+  - 11__proc__score_and_publish_marts.sql:213
+    FROM FORECAST_MODEL_RUNS (reads model metadata)
+
+TABLE DEFINITIONS:
+  - 10__setup__model_tracking_tables.sql:13
+    CREATE OR REPLACE TABLE FORECAST_MODEL_RUNS (19 columns)
+
+  - 10__setup__model_tracking_tables.sql:75
+    CREATE OR REPLACE TABLE FORECAST_MODEL_CHAMPIONS (9 columns)
+
+ARCHIVE REFERENCES:
+  - docs/RIDGE_ARCHIVE_AND_REMOVAL.md
+    Documents archival to FORECAST_MODEL_RUNS_RIDGE_ARCHIVE
+    Documents archival to FORECAST_MODEL_CHAMPIONS_RIDGE_ARCHIVE
+    Contains DELETE statements (executed 2026-01-29)
+
+================================================================================
+5. SCORING & PUBLISHING PROCEDURE
+================================================================================
+
+PRIMARY PROCEDURE:
+  - 11__proc__score_and_publish_marts.sql
+    CREATE OR REPLACE PROCEDURE SP_SCORE_AND_PUBLISH_FORECASTS
+
+CALLERS:
+  - test_execute_scoring.py:20 (manual test execution)
+  - test_scoring.py:102 (test framework)
+  - test_scoring_queries.sql:4 (test SQL)
+  - test_scoring_simple.py:61 (test framework)
+
+DOCUMENTATION:
+  - RECOMMENDED_CODE_CHANGES.md:376 (improvement suggestions)
+  - docs/RIDGE_ARCHIVE_AND_REMOVAL.md:160 (Ridge removal impact)
+
+================================================================================
+6. ANCHOR_FISCAL_YYYYMM COLUMN (anchor+horizon pattern)
+================================================================================
+
+REFERENCES: 50+ files
+
+TABLE SCHEMAS:
+  - 09__proc__build_model_dataset_pc_reason_h.sql:10
+    anchor_fiscal_yyyymm NUMBER (in dataset table)
+
+  - 10__setup__model_tracking_tables.sql:58
+    anchor_fiscal_yyyymm NUMBER (in backtest predictions table)
+
+PRODUCTION LOGIC:
+  - 09__proc__build_model_dataset_pc_reason_h.sql:215
+    a.fiscal_yyyymm as anchor_fiscal_yyyymm (computes anchor from fiscal month)
+
+  - 10__modeling__backtest_global_plus_overrides.ipynb:496
+    "ANCHOR_FISCAL_YYYYMM": int(r["ANCHOR_FISCAL_YYYYMM"]) (writes predictions)
+
+  - 11__proc__score_and_publish_marts.sql:164
+    :V_ASOF_YYYYMM as anchor_fiscal_yyyymm (uses ASOF as anchor for scoring)
+
+DATA FILES:
+  - analysis/backups/pc715_champion_preds_before_20260131.csv:1 (has column)
+  - experiments/pc715/features.csv:1 (has column)
+
+================================================================================
+7. HORIZON COLUMN (1-12 months ahead)
+================================================================================
+
+REFERENCES: 50+ files
+
+TABLE SCHEMAS:
+  - 09__proc__build_model_dataset_pc_reason_h.sql:15
+    horizon NUMBER (1..12)
+
+  - 10__setup__model_tracking_tables.sql (implicit in backtest predictions)
+
+PRODUCTION LOGIC:
+  - 09__proc__build_model_dataset_pc_reason_h.sql:94
+    P_MAX_HORIZON NUMBER DEFAULT 12 (parameter)
+
+  - 09__proc__build_model_dataset_pc_reason_h.sql:193
+    SELECT seq4()+1 as horizon FROM table(generator(rowcount => :P_MAX_HORIZON))
+    (Generates horizon grid 1..12)
+
+  - 10__modeling__backtest_global_plus_overrides.ipynb:99
+    MAX_HORIZON = 12 (Python constant)
+
+  - 10__modeling__backtest_global_plus_overrides.ipynb:300
+    if "HORIZON" not in num_cols: num_cols.append("HORIZON")
+    (HORIZON used as model feature)
+
+TARGET COMPUTATION:
+  - 09__proc__build_model_dataset_pc_reason_h.sql:255
+    and t.month_seq = a.month_seq + h.horizon
+    (Target month = Anchor month + Horizon)
+
+================================================================================
+8. FORECAST_MONTH COLUMN
+================================================================================
+
+ONLY 1 REFERENCE FOUND:
+  - test_scoring.py:120
+    count(distinct target_fiscal_yyyymm) as forecast_months
+    (Uses TARGET_FISCAL_YYYYMM, NOT forecast_month)
+
+CONCLUSION: No "forecast_month" column exists in production tables.
+           Repository uses ANCHOR_FISCAL_YYYYMM + HORIZON → TARGET_FISCAL_YYYYMM pattern.
+
+================================================================================
+9. SNAPSHOT / ARCHIVAL PATTERN
+================================================================================
+
+REFERENCES: 17 files
+
+SNAPSHOT PATTERN IN DATA PROCS (overwrite-by-run):
+  - 06__proc__build_actuals_pc_reason.sql:40
+    snapshotted_at TIMESTAMP_NTZ (column in actuals table)
+
+  - 07__proc__build_cust_mix_pc_reason.sql:46
+    snapshotted_at TIMESTAMP_NTZ (column in customer mix table)
+
+  - 08__proc__build_budget_pc_reason_mth.sql:40
+    snapshotted_at TIMESTAMP_NTZ (column in budget table)
+
+ORCHESTRATOR CONFIG SNAPSHOT:
+  - 04__proc__run_orchestrator.sql:12
+    config_snapshot VARIANT (stores run configuration)
+
+  - 04__proc__run_orchestrator.sql:81
+    config_snapshot = to_variant(object_construct(...))
+    (Captures config for reproducibility)
+
+SEMANTICS NOTES:
+  - 06__proc__build_actuals_pc_reason.sql:147
+    "-- Snapshot table: overwrite-by-run semantics (safe reruns)"
+
+  - 07__proc__build_cust_mix_pc_reason.sql:350
+    "-- Snapshot (overwrite-by-run semantics)"
+
+  - 09__proc__build_model_dataset_pc_reason_h.sql:330
+    "-- Snapshot overwrite-by-run"
+
+CRITICAL FINDING: NO SNAPSHOT FOR FORECAST_MODEL_BACKTEST_PREDICTIONS
+  - Predictions table does NOT use snapshot pattern
+  - DELETE statements in backtest notebook (line 404, 1340) are HIGH RISK
+  - No time-based archival or append-only pattern for published forecasts
+
+================================================================================
+10. AIRFLOW / SCHEDULING / TASKS
+================================================================================
+
+NO AIRFLOW DAG FILES FOUND
+
+NO SNOWFLAKE TASK REFERENCES IN REPOSITORY
+
+ONLY REFERENCE:
+  - .gitignore:88
+    celerybeat-schedule (ignored file for Celery beat scheduler)
+
+CONCLUSION: No automated scheduling found in repository.
+           Execution appears to be manual (test_*.py scripts call stored procs).
+
+================================================================================
+11. OVERRIDE TABLES
+================================================================================
+
+NO REFERENCES TO "FORECAST_MODEL_OVERRIDES" OR SIMILAR OVERRIDE TABLES
+
+Model override logic appears to be in notebook filename:
+  - 10__modeling__backtest_global_plus_overrides.ipynb
+    (Suggests override capability but no dedicated override table)
+
+================================================================================
+SUMMARY OF KEY FINDINGS
+================================================================================
+
+✓ ALIGNED:
+  1. Repository does NOT expect FORECAST_MODEL_PREDICTIONS (matches reality)
+  2. FORECAST_MODEL_BACKTEST_PREDICTIONS is the canonical table (matches profiling)
+  3. Budget view is read-only, never used as feature (safe)
+  4. Champion selection uses FORECAST_MODEL_CHAMPIONS (as expected)
+  5. Anchor+horizon pattern is consistent across all code
+
+⚠ MISMATCHES / GAPS:
+  1. NO forecast_month column (code uses anchor+horizon→target pattern)
+  2. NO dedicated published forecasts table (backtest table serves both purposes)
+  3. NO snapshot/archival for FORECAST_MODEL_BACKTEST_PREDICTIONS (HIGH RISK)
+  4. DELETE statements in backtest notebook can cause data loss (HIGH RISK)
+  5. NO automated scheduling (manual execution only)
+
+🔴 HIGH RISK ITEMS:
+  1. 10__modeling__backtest_global_plus_overrides.ipynb:404
+     DELETE FROM FORECAST_MODEL_BACKTEST_PREDICTIONS (no WHERE clause - truncates all)
+  
+  2. 10__modeling__backtest_global_plus_overrides.ipynb:1340
+     DELETE FROM FORECAST_MODEL_BACKTEST_PREDICTIONS WHERE ... (conditional but destructive)
+
+  3. No monthly snapshot job for published forecasts
+     (If predictions are deleted, historical forecasts are lost)
+
+================================================================================
