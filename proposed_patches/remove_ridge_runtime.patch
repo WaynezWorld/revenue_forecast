@@ -1,0 +1,12 @@
+--- a/11__proc__score_and_publish_marts.sql
++++ b/11__proc__score_and_publish_marts.sql
+@@ -276,7 +276,9 @@ begin
+           -- Seasonal naive: use lag-12
+           coalesce(lag12.total_revenue, 0)
+         
+-        when m.model_family in ('ridge', 'gbr') then
++        -- ridge removed from runtime: incompatible with signed_log1p transform (archived and deleted)
++        when m.model_family = 'gbr' then
+           -- Use backtest prediction pattern with growth ratio
+           coalesce(
+             -- Try recent backtests with anchor scaling
