@@ -1,0 +1,2 @@
+learning_rate,n_estimators,max_depth,min_child_samples,subsample,colsample_bytree,reg_alpha,reg_lambda,random_state,verbose,force_col_wise
+0.1,50,8,20,0.6,0.8,0.0,1.0,42,-1,True
