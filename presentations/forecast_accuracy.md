@@ -2,11 +2,15 @@
 
 **Model**: GradientBoostingRegressor (3c4074b1-ba9d-47aa-ab45-1d16adb1bfef)
 
-## Company-Level Metrics
+## Company-Level Metrics (Horizon=1)
 
-- **WAPE**: 28.26%
-- **MAE**: $11,911
-- **BIAS**: -14.14%
+| Scenario | WAPE (%) | MAE ($) | BIAS (%) |
+|----------|----------|---------|----------|
+| **Champion (GBR)** | 27.36 | 11,116 | -13.16 |
+| **What-if (PC715 tuned)** | 27.15 | 11,030 | -12.53 |
+| **Delta** | **-0.21pp** | **-$86** | **+0.62pp** |
+
+**Impact**: The what-if scenario (replacing PC715 champion with tuned LightGBM) reduces company WAPE from 27.36% to 27.15% (-0.8% relative improvement) and improves bias from -13.16% to -12.53%, reducing systematic underforecasting.
 
 ## Accuracy by Horizon
 
