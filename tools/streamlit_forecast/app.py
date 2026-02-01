@@ -16,7 +16,9 @@ Author: Data Science Team
 Created: 2026-01-31
 """
 
+# ARTHUR PATCH - imports
 import os
+import traceback
 import pandas as pd
 import streamlit as st
 from datetime import datetime
@@ -106,100 +108,185 @@ def load_csv_data():
     return data
 
 
+# ARTHUR PATCH - robust Snowflake connection helper
 def get_snowflake_connection():
-    """Create Snowflake connection if credentials available."""
+    """Return Snowflake connection or None. Supports password and externalbrowser auth."""
     if not SNOWFLAKE_AVAILABLE:
         return None
     
+    account = os.environ.get("SNOWFLAKE_ACCOUNT")
+    user = os.environ.get("SNOWFLAKE_USER")
+    password = os.environ.get("SNOWFLAKE_PASSWORD")
+    role = os.environ.get("SNOWFLAKE_ROLE")
+    warehouse = os.environ.get("SNOWFLAKE_WAREHOUSE")
+    database = os.environ.get("SNOWFLAKE_DATABASE")
+    schema = os.environ.get("SNOWFLAKE_SCHEMA")
+    authenticator = os.environ.get("SNOWFLAKE_AUTHENTICATOR")  # optional, e.g., externalbrowser
+
+    if not account or not user:
+        return None
+
+    kwargs = {
+        "user": user,
+        "account": account,
+        "role": role,
+        "warehouse": warehouse,
+        "database": database,
+        "schema": schema,
+        "client_session_keep_alive": True,
+    }
+    if password:
+        kwargs["password"] = password
+    else:
+        if authenticator and authenticator.lower() == "externalbrowser":
+            kwargs["authenticator"] = "externalbrowser"
+        else:
+            # No interactive auth configured
+            return None
+
     try:
-        conn = snowflake.connector.connect(
-            account=os.getenv("SNOWFLAKE_ACCOUNT"),
-            user=os.getenv("SNOWFLAKE_USER"),
-            password=os.getenv("SNOWFLAKE_PASSWORD"),
-            role=os.getenv("SNOWFLAKE_ROLE", "SNFL_PRD_BI_POWERUSER_FR"),
-            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE", "BI_P_QRY_FIN_OPT_WH"),
-            database=os.getenv("SNOWFLAKE_DATABASE", "DB_BI_P_SANDBOX"),
-            schema=os.getenv("SNOWFLAKE_SCHEMA", "SANDBOX")
-        )
+        conn = snowflake.connector.connect(**{k: v for k, v in kwargs.items() if v is not None})
+        # quick smoke test
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
         return conn
     except Exception as e:
-        st.error(f"Snowflake connection failed: {e}")
+        # return None and let caller handle UI messaging
         return None
 
 
+# ARTHUR PATCH - diagnostic function
+def _sf_diag():
+    """Return diagnostic info about Snowflake connection for troubleshooting."""
+    info = {}
+    info['SNOWFLAKE_ACCOUNT'] = bool(os.getenv('SNOWFLAKE_ACCOUNT'))
+    info['SNOWFLAKE_USER'] = bool(os.getenv('SNOWFLAKE_USER'))
+    info['SNOWFLAKE_PASSWORD_PRESENT'] = bool(os.getenv('SNOWFLAKE_PASSWORD'))
+    info['SNOWFLAKE_AUTHENTICATOR'] = os.getenv('SNOWFLAKE_AUTHENTICATOR')
+    info['SNOWFLAKE_WAREHOUSE'] = os.getenv('SNOWFLAKE_WAREHOUSE')
+    info['SNOWFLAKE_DATABASE'] = os.getenv('SNOWFLAKE_DATABASE')
+    info['SNOWFLAKE_SCHEMA'] = os.getenv('SNOWFLAKE_SCHEMA')
+    info['SNOWFLAKE_AVAILABLE'] = SNOWFLAKE_AVAILABLE
+    try:
+        conn = get_snowflake_connection()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("SELECT CURRENT_VERSION(), CURRENT_USER(), CURRENT_DATABASE(), CURRENT_SCHEMA()")
+            result = cur.fetchone()
+            cur.close()
+            conn.close()
+            info['CONN_OK'] = True
+            info['CONN_MSG'] = f"Connected: {result}"
+        else:
+            info['CONN_OK'] = False
+            info['CONN_MSG'] = "get_snowflake_connection() returned None - missing creds or externalbrowser not configured"
+    except Exception as e:
+        info['CONN_OK'] = False
+        info['CONN_MSG'] = str(e)
+        info['CONN_TRACE'] = traceback.format_exc()
+    return info
+
+
+# ARTHUR PATCH - load_model_runs_from_db
 @st.cache_data(ttl=3600)
-def load_model_runs_from_db():
-    """Load last 10 model runs from Snowflake."""
+def load_model_runs_from_db(limit=20):
+    """Load model runs from Snowflake using connector cursor."""
     conn = get_snowflake_connection()
     if not conn:
         return None
-    
+    cur = None
     try:
-        query = """
-        SELECT 
-            model_run_id,
-            model_name,
-            created_at,
-            wape,
-            mae,
-            bias
-        FROM DB_BI_P_SANDBOX.SANDBOX.FORECAST_MODEL_RUNS
-        WHERE wape IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 10
-        """
-        df = pd.read_sql(query, conn)
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT model_run_id,
+                   COALESCE(params:candidate::string, RUN_ID) AS model_name,
+                   model_family, asof_fiscal_yyyymm, created_at
+            FROM DB_BI_P_SANDBOX.SANDBOX.FORECAST_MODEL_RUNS
+            ORDER BY created_at DESC
+            LIMIT {limit}
+        """)
+        df = cur.fetch_pandas_all()
+        cur.close()
         conn.close()
         return df
     except Exception as e:
-        st.warning(f"Could not load model runs from DB: {e}")
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        try: conn.close()
+        except: pass
         return None
 
 
+# ARTHUR PATCH - load_forecast_from_db
 @st.cache_data(ttl=3600)
-def load_forecast_from_db(model_run_id, min_month=None, max_month=None):
-    """Load forecast data from Snowflake."""
+def load_forecast_from_db(model_run_id, year=None, period=None):
+    """Load forecast data from vw_forecast_report_mart."""
     conn = get_snowflake_connection()
     if not conn:
         return None
-    
+    cur = conn.cursor()
     try:
-        where_clauses = [f"model_run_id = '{model_run_id}'"]
-        if min_month:
-            where_clauses.append(f"target_fiscal_yyyymm >= {min_month}")
-        if max_month:
-            where_clauses.append(f"target_fiscal_yyyymm <= {max_month}")
-        
-        query = f"""
-        SELECT 
-            model_run_id,
-            roll_up_shop AS pc,
-            reason_group,
-            anchor_fiscal_yyyymm,
-            horizon,
-            target_fiscal_yyyymm AS forecast_month,
-            y_pred AS forecast,
-            y_pred_lo AS forecast_lo,
-            y_pred_hi AS forecast_hi
-        FROM DB_BI_P_SANDBOX.SANDBOX.FORECAST_MODEL_BACKTEST_PREDICTIONS
-        WHERE {' AND '.join(where_clauses)}
-        ORDER BY target_fiscal_yyyymm, roll_up_shop
-        LIMIT {MAX_ROWS_DB}
-        """
-        
-        df = pd.read_sql(query, conn)
+        filters = [f"model_run_id = '{model_run_id}'", "horizon = 1"]
+        if year:
+            filters.append(f"FORECAST_FISCAL_YEAR = {int(year)}")
+        if period:
+            filters.append(f"FORECAST_FISCAL_PERIOD = {int(period)}")
+        where = " AND ".join(filters)
+        cur.execute(f"""
+            SELECT model_run_id, roll_up_shop AS pc, roll_up_shop_name,
+                   customer_group, reason_code_group, anchor_fiscal_yyyymm, horizon,
+                   target_fiscal_yyyymm AS forecast_month, y_true, y_pred AS forecast,
+                   y_pred_lo AS forecast_lo, y_pred_hi AS forecast_hi, created_at
+            FROM DB_BI_P_SANDBOX.SANDBOX.vw_forecast_report_mart
+            WHERE {where}
+            ORDER BY roll_up_shop, reason_code_group, forecast_month
+            LIMIT {MAX_ROWS_DB}
+        """)
+        df = cur.fetch_pandas_all()
+        cur.close()
         conn.close()
-        
-        if len(df) >= MAX_ROWS_DB:
-            st.warning(f"Query returned {len(df)} rows (limit reached). Results may be incomplete.")
-        
         return df
     except Exception as e:
-        st.error(f"Error loading forecast from DB: {e}")
-        if conn:
-            conn.close()
+        if cur: cur.close()
+        try: conn.close()
+        except: pass
+        return None
+
+
+# ARTHUR PATCH - load_filter_values_from_db
+@st.cache_data(ttl=3600)
+def load_filter_values_from_db():
+    """Return filter values from champion view."""
+    conn = get_snowflake_connection()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    try:
+        # Get distinct filters from champion view for stable keys
+        cur.execute("""
+            SELECT DISTINCT
+              roll_up_shop,
+              roll_up_shop_name,
+              customer_group,
+              reason_code_group,
+              forecast_fiscal_year,
+              forecast_fiscal_period
+            FROM DB_BI_P_SANDBOX.SANDBOX.vw_forecast_for_report_champion
+        """)
+        fdf = cur.fetch_pandas_all()
+        cur.close()
+        conn.close()
+        return {
+            "pcs": sorted(fdf['ROLL_UP_SHOP'].dropna().unique().tolist()) if 'ROLL_UP_SHOP' in fdf.columns else [],
+            "pc_names": {r['ROLL_UP_SHOP']: r['ROLL_UP_SHOP_NAME'] for _, r in fdf.drop_duplicates('ROLL_UP_SHOP').iterrows()} if 'ROLL_UP_SHOP_NAME' in fdf.columns else {},
+            "customer_groups": sorted(fdf['CUSTOMER_GROUP'].dropna().unique().tolist()) if 'CUSTOMER_GROUP' in fdf.columns else [],
+            "reason_groups": sorted(fdf['REASON_CODE_GROUP'].dropna().unique().tolist()) if 'REASON_CODE_GROUP' in fdf.columns else [],
+            "years": sorted(fdf['FORECAST_FISCAL_YEAR'].dropna().unique().tolist()) if 'FORECAST_FISCAL_YEAR' in fdf.columns else []
+        }
+    except Exception as e:
+        if cur: cur.close()
+        try: conn.close()
+        except: pass
         return None
 
 
@@ -216,12 +303,18 @@ def format_currency(value):
 
 def compute_what_if(forecast_df, whatif_df):
     """Replace PC715 champion forecasts with tuned what-if forecasts."""
+    if forecast_df is None or forecast_df.empty:
+        return forecast_df
     if whatif_df is None or whatif_df.empty:
         st.warning("No what-if data available")
         return forecast_df
     
     # Create copy
     result = forecast_df.copy()
+    
+    # ARTHUR PATCH - Check if required columns exist
+    if 'pc' not in result.columns:
+        return result
     
     # Replace PC715 rows with what-if values
     pc715_mask = result['pc'] == '715'
@@ -244,6 +337,8 @@ def compute_what_if(forecast_df, whatif_df):
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
+    global CSV_MODE
+    
     st.set_page_config(
         page_title="Revenue Forecast Viewer",
         page_icon="📊",
@@ -253,9 +348,26 @@ def main():
     st.title("📊 Revenue Forecast Viewer")
     st.caption("Data Science Team | Finance Dashboard")
     
+    # ARTHUR PATCH - Add diagnostic expander
+    with st.expander("🔧 Snowflake Diagnostic (DEBUG)", expanded=False):
+        diag = _sf_diag()
+        for k, v in diag.items():
+            st.write(f"**{k}**: {v}")
+    
+    # Test Snowflake connection at startup and set mode
+    test_conn = get_snowflake_connection()
+    if test_conn:
+        CSV_MODE = False
+        test_conn.close()
+    else:
+        CSV_MODE = True
+    
     # Show mode
     mode_indicator = "🔗 Snowflake Mode" if not CSV_MODE else "📂 CSV Mode (No Snowflake credentials)"
     st.sidebar.markdown(f"**Mode**: {mode_indicator}")
+    
+    if CSV_MODE:
+        st.sidebar.info("Running in CSV Mode: Snowflake credentials not found or connection failed.")
     
     # ───────────────────────────────────────────────────────────────
     # SIDEBAR FILTERS
@@ -263,58 +375,83 @@ def main():
     
     st.sidebar.header("Filters")
     
-    # Load data
+    # Model selection
+    selected_model_id = None
+    forecast_df = pd.DataFrame()
+    backtest_df = pd.DataFrame()
+    whatif_df = pd.DataFrame()
+    
     if CSV_MODE:
+        # CSV mode - load from files
         data = load_csv_data()
         forecast_df = data.get('forecast', pd.DataFrame())
         backtest_df = data.get('backtest', pd.DataFrame())
         whatif_df = data.get('whatif', pd.DataFrame())
     else:
-        # DB mode - load model runs first
+        # DB mode - load model runs from FORECAST_MODEL_RUNS
+        st.sidebar.subheader("Model Selection")
         model_runs_df = load_model_runs_from_db()
+        
+        # ARTHUR PATCH - show diagnostic info
+        if model_runs_df is not None:
+            st.sidebar.caption(f"📊 Models loaded: {len(model_runs_df)}")
+        
         if model_runs_df is None or model_runs_df.empty:
-            st.warning("No model runs found in database. Falling back to CSV mode.")
+            st.sidebar.warning("No models found in FORECAST_MODEL_RUNS. Falling back to CSV mode.")
             CSV_MODE = True
             data = load_csv_data()
             forecast_df = data.get('forecast', pd.DataFrame())
             backtest_df = data.get('backtest', pd.DataFrame())
             whatif_df = data.get('whatif', pd.DataFrame())
         else:
-            # Let user select model
-            st.sidebar.subheader("Model Selection")
             model_options = [
-                f"{row['model_name']} ({row['model_run_id'][:8]}...)"
+                f"{row['MODEL_NAME']} ({row['MODEL_RUN_ID'][:8]}...)"
                 for _, row in model_runs_df.iterrows()
             ]
-            selected_model_idx = st.sidebar.selectbox(
+            sel_idx = st.sidebar.selectbox(
                 "Select Model Run",
-                range(len(model_options)),
+                list(range(len(model_options))),
                 format_func=lambda i: model_options[i]
             )
-            selected_model_id = model_runs_df.iloc[selected_model_idx]['model_run_id']
+            selected_model_id = model_runs_df.iloc[sel_idx]['MODEL_RUN_ID']
             
             # Load forecast for selected model
-            forecast_df = load_forecast_from_db(selected_model_id, min_month=202601, max_month=202612)
-            backtest_df = pd.DataFrame()  # TODO: Load from DB if needed
-            whatif_df = data.get('whatif', pd.DataFrame()) if 'data' in locals() else pd.DataFrame()
+            forecast_df = load_forecast_from_db(selected_model_id)
+            if forecast_df is None or forecast_df.empty:
+                st.warning("Could not load forecast from DB. Check if vw_forecast_report_mart has data for this model.")
+                forecast_df = pd.DataFrame()
     
-    # Year filter
-    current_year = datetime.now().year
-    if not forecast_df.empty and 'forecast_month' in forecast_df.columns:
-        years = sorted(forecast_df['forecast_month'].astype(str).str[:4].unique())
-        year_filter = st.sidebar.selectbox("Year", years, index=len(years)-1 if years else 0)
+    # Load filter values from data
+    if not CSV_MODE and not forecast_df.empty:
+        # Extract filter values from loaded forecast data
+        pcs = sorted(forecast_df['pc'].dropna().unique().tolist()) if 'pc' in forecast_df.columns else []
+        customer_groups = sorted(forecast_df['customer_group'].dropna().unique().tolist()) if 'customer_group' in forecast_df.columns else []
+        reason_groups = sorted(forecast_df['reason_code_group'].dropna().unique().tolist()) if 'reason_code_group' in forecast_df.columns else []
+        years = sorted(forecast_df['forecast_month'].astype(str).str[:4].unique().tolist()) if 'forecast_month' in forecast_df.columns else []
+    elif CSV_MODE and not forecast_df.empty:
+        # Extract from CSV data
+        pcs = sorted(forecast_df['pc'].dropna().unique().tolist()) if 'pc' in forecast_df.columns else []
+        customer_groups = sorted(forecast_df['customer_group'].dropna().unique().tolist()) if 'customer_group' in forecast_df.columns else []
+        reason_groups = sorted(forecast_df['reason_code_group'].dropna().unique().tolist()) if 'reason_code_group' in forecast_df.columns else []
+        years = sorted(forecast_df['forecast_month'].astype(str).str[:4].unique().tolist()) if 'forecast_month' in forecast_df.columns else []
     else:
-        year_filter = str(current_year)
+        pcs = []
+        customer_groups = []
+        reason_groups = []
+        years = []
     
-    # Month filter
-    if not forecast_df.empty and 'forecast_month' in forecast_df.columns:
-        months = sorted(forecast_df[forecast_df['forecast_month'].astype(str).str[:4] == year_filter]['forecast_month'].unique())
-        if months:
-            month_filter = st.sidebar.selectbox("Forecast Month", months, index=0)
-        else:
-            month_filter = None
+    # Filter widgets
+    pc_choice = st.sidebar.selectbox("Roll Up Shop / PC", ["All"] + pcs) if pcs else "All"
+    cust_choice = st.sidebar.selectbox("Customer Group", ["All"] + customer_groups) if customer_groups else "All"
+    reason_choice = st.sidebar.selectbox("Reason Code Group", ["All"] + reason_groups) if reason_groups else "All"
+    year_choice = st.sidebar.selectbox("Year", ["All"] + years) if years else "All"
+    
+    # Month filter (derived from year)
+    if not forecast_df.empty and 'forecast_month' in forecast_df.columns and year_choice != "All":
+        months = sorted(forecast_df[forecast_df['forecast_month'].astype(str).str[:4] == str(year_choice)]['forecast_month'].unique())
+        month_filter = st.sidebar.selectbox("Forecast Month", ["All"] + [str(m) for m in months]) if months else "All"
     else:
-        month_filter = None
+        month_filter = "All"
     
     # PC715 what-if toggle
     include_whatif = st.sidebar.checkbox(
@@ -341,12 +478,18 @@ def main():
     else:
         display_df = forecast_df.copy()
     
-    # Filter by year/month
-    if not display_df.empty and 'forecast_month' in display_df.columns:
-        if year_filter:
-            display_df = display_df[display_df['forecast_month'].astype(str).str[:4] == year_filter]
-        if month_filter:
-            display_df = display_df[display_df['forecast_month'] == month_filter]
+    # Apply filters to display_df
+    if not display_df.empty:
+        if pc_choice and pc_choice != "All" and 'pc' in display_df.columns:
+            display_df = display_df[display_df['pc'] == pc_choice]
+        if cust_choice and cust_choice != "All" and 'customer_group' in display_df.columns:
+            display_df = display_df[display_df['customer_group'] == cust_choice]
+        if reason_choice and reason_choice != "All" and 'reason_code_group' in display_df.columns:
+            display_df = display_df[display_df['reason_code_group'] == reason_choice]
+        if year_choice and year_choice != "All" and 'forecast_month' in display_df.columns:
+            display_df = display_df[display_df['forecast_month'].astype(str).str[:4] == str(year_choice)]
+        if month_filter and month_filter != "All" and 'forecast_month' in display_df.columns:
+            display_df = display_df[display_df['forecast_month'] == int(month_filter)]
     
     # ───────────────────────────────────────────────────────────────
     # TAB 1: MONTHLY FORECAST
@@ -357,16 +500,21 @@ def main():
     with tab1:
         st.subheader("Next 12 Months Forecast")
         
-        if display_df.empty:
+        # ARTHUR PATCH - robust empty-frame handling
+        if display_df is None or display_df.empty:
             st.warning("No forecast data available for selected filters")
         else:
             # Aggregate by month
             if 'forecast' in display_df.columns:
-                monthly_agg = display_df.groupby('forecast_month').agg({
+                agg_dict = {
                     'forecast': 'sum',
                     'forecast_lo': 'sum',
                     'forecast_hi': 'sum'
-                }).reset_index()
+                }
+                if 'y_true' in display_df.columns:
+                    agg_dict['y_true'] = 'sum'
+                
+                monthly_agg = display_df.groupby('forecast_month').agg(agg_dict).reset_index()
                 
                 # Display table
                 st.dataframe(
@@ -408,6 +556,16 @@ def main():
                         line=dict(color='blue', width=2)
                     ))
                     
+                    # Actuals line (if available)
+                    if 'y_true' in monthly_agg.columns:
+                        fig.add_trace(go.Scatter(
+                            x=monthly_agg['forecast_month'],
+                            y=monthly_agg['y_true'],
+                            mode='lines+markers',
+                            name='Actuals',
+                            line=dict(color='green', width=2, dash='dot')
+                        ))
+                    
                     fig.update_layout(
                         title="Monthly Revenue Forecast",
                         xaxis_title="Forecast Month",
@@ -420,10 +578,11 @@ def main():
             
             # Download button
             csv = display_df.head(MAX_ROWS_DISPLAY).to_csv(index=False)
+            year_for_file = year_choice if year_choice != "All" else "all"
             st.download_button(
                 label="Download visible table as CSV",
                 data=csv,
-                file_name=f"forecast_{year_filter}_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name=f"forecast_{year_for_file}_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv"
             )
     
